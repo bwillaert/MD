@@ -23,6 +23,7 @@
 #define DAC_OUT          PORTA.RA0            // DAC OUT --> opamp DC offset
 #define BEEP             LATA.LATA2            // OUT  audio -- PWM3 RA2       pin 11 
 #define PI_TX            LATC.LATC5            // OUT  MD pulse                pin 5
+#define DETECTION_PIN    LATC.LATC3            // Digital detection output
 
 #define PP_BUTTON        PORTA.RA3            // IN   pinpoint button      pin 4
 #define COMP_IN          PORTC.RC1            // IN AN comparator 2 input     pin 9
@@ -516,6 +517,15 @@ void tx_pulse_processing()
            if (pulsediff > 64) 
            {
              pulsediff = 64;
+           }
+           // Detection output
+           if (pulsediff == 64)
+           {
+              DETECTION_PIN = 1;
+           }
+           else
+           {
+              DETECTION_PIN = 0;
            }
  
            // Calculate audio divider -- based on 500us timer interrupt;
