@@ -10,17 +10,21 @@
    * NOTES:
      - Motion detection 
      - Pinpoint button  switches to non-motion
-     - PWM audio out
      - Front end opamp DC auto offset adjust with DAC
+     - Comparator slicing level set via PWM output
+     
+     v4.1:
+     - adjust slicing level according to the sensitivity setting
+     - higher sensitivity = higher slicing level ( closer to DC offset )
 */
 //======================================================================
 //
 // constant values
 //
-//#define RS_OUTPUT
+
 
 // I/O pins
-#define DAC_OUT          PORTA.RA0            // DAC OUT --> opamp DC offset
+#define DAC_OUT          PORTA.RA0             // DAC OUT --> opamp DC offset
 #define BEEP             LATA.LATA2            // OUT  audio -- PWM3 RA2       pin 11 
 #define PI_TX            LATC.LATC5            // OUT  MD pulse                pin 5
 #define DETECTION_PIN    LATC.LATC3            // Digital detection output
@@ -28,39 +32,36 @@
 #define PP_BUTTON        PORTA.RA3            // IN   pinpoint button      pin 4
 #define COMP_IN          PORTC.RC1            // IN AN comparator 2 input     pin 9
 #define PWM_OUT          PORTA.RA2            // PWM out  pin 11
-#define RS_OUT           PORTC.RC4            // RS232 OUT                  pin 6
-#define RS_TX_PIN        7                    // RS232 OUT                  pin 6
 #define LOW_VOLTAGE_IN   PORTA.RA1            // Low battery detection AN1      pin 12
 #define SENSITIVITY_IN   PORTC.RA4            // Sensitivity potmeter  AN3      pin 3
 
 #define TX_PULSE_WIDTH          100      // TX pulse width in microseconds
 #define PULSE_TIME_DIVIDER       4       // * 512 micros 
 #define ACCUMULATE_MEASURE_CNT   5       // *  PULSE_TIME_DIVIDER * 512 micros
-#define LV_TIME_DIVIDER          50000   // * 512 micros -- battery voltage check
-#define SENSITIVITY_TIME_DIVIDER 2000    // * 512 micros = 1s -- sensitivity potmeter check
+#define LV_TIME_DIVIDER          50000   // * 512 micros -- battery voltage check - every 25 s
+#define SENSITIVITY_TIME_DIVIDER 2000    // * 512 micros = 1s -- sensitivity potmeter check - every  1 s
 #define LOW_BATT_LIMIT           0x200   // 10 bits ADC  - max 3FF   min 10V - 47K+10K => 1.75V =358 / 0X166
-#define STARTUP_DELAY            5000     // * 409.6 micros -- startup settling time
+#define STARTUP_DELAY            5000     // * 512 micros -- startup settling time
 #define COIL_TIMEOUT             2        // * 512 micros -- coil pulse timeout
-#define CALIBRATION_DELAY        1500     // * 2 ms  
-#define ADC_TARGET               800      // (5V / 1024) * ADC_TARGET
+#define CALIBRATION_DELAY        1500     // * 2 ms - delay between 2 calibration steps
+#define ADC_TARGET               830      // (5V / 1024) * ADC_TARGET = DC offset
 #define ADC_TOLERANCE            10
 #define PULSE_ARRAY_SIZE         32
 #define NOISE_TRESHOLD           20
-#define DC_OFFSET_MARGIN         55       // 0-255 = 0-5V
+#define DC_OFFSET_MARGIN         50       // 0-255 = 0-5V
 
 
 #define TRUE 1
 #define FALSE 0
 
-#define OFF 0
 #define ON  1
+#define OFF 0
 
 #define IN 1
 #define OUT 0
 
 
 // globals
-static unsigned char detection;
 static unsigned int measurecnt;
 static unsigned int accumulate_measure_cnt;
 static unsigned int pulse_time;
@@ -87,6 +88,7 @@ static unsigned char motion_cal_cnt ;
 static unsigned int measure_cal;
 static unsigned char pulse_array_size;
 static unsigned char pulse_array_shift;
+static unsigned int DC_offset;
 
 
 
@@ -176,58 +178,6 @@ void interrupt(void)
 }
 
 
-void UARTWrite( char c)
-{
-#ifdef RS_OUTPUT
-     TXREG = c;
-     Delay_us(5);
-     while (!PIR1.TXIF); // wait until TXREG emtpy
-#endif
-}
-
-//======================================================================
-// send a 16 bit number over RS232
-//
-void sendhex (unsigned long hexnumber, unsigned char cr )
-{
-#ifdef RS_OUTPUT
-      int nibble = 0;
-      const char hexnr[]={'0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F'};
-
-      for (nibble = 0; nibble < 6; nibble++)
-      {
-          UARTWrite(hexnr[(hexnumber&0xF00000)>>20]);
-          hexnumber<<=4;
-      }
-      if (cr)
-      {
-       UARTWrite('\r');
-       UARTWrite('\n');
-      }
-#endif
-}
-
-//======================================================================
-// send a string over RS232
-//
-void sendstring (char* string, unsigned char cr)
-{
-#ifdef RS_OUTPUT
-          int i = 0;
-          char c;
-          while (c=string[i++])
-          {
-                  UARTWrite(c);
-          }
-          if (cr)
-          {
-                  UARTWrite('\r');
-                  UARTWrite('\n');
-          }
-#endif
-}
-
-
 
 //======================================================================
 //
@@ -254,6 +204,7 @@ void sound (unsigned int period, unsigned long duration)
      }
 }
 
+// Detector start sound
 void start_sound()
 {
     INTCON.GIE = 0;
@@ -266,9 +217,18 @@ void start_sound()
     INTCON.GIE = 1;
 }
 
+// Calibration finished sound
+void ready_sound()
+{
+    sound ( 10, 300);    // 1 KHz
+    Delay_ms(200);
+    sound ( 20, 300);    // 500 Hz
+    Delay_ms(200);
+    sound ( 10, 300);    // 1 KHz
+}
 
 
-
+// Aux: return abs value
 unsigned long absvalue(unsigned long a, unsigned long b)
 {
     if (a > b)
@@ -282,18 +242,6 @@ unsigned long absvalue(unsigned long a, unsigned long b)
 
 }
 
-// DAC TEST
-void DACTest()
-{
-unsigned char testValue = 0;
-
-     for (testValue =0; testValue < 32; testValue++)
-     {
-     
-        DACCON1 = testValue;  
-        Delay_ms(100);
-     }
-}
 //
 // This is called every 2 ms
 // Calibrate opamp DC offset to 4.0 V measured after TX pulse
@@ -302,7 +250,6 @@ void calibrate_offset()
 {
      static char old_calibration_step = 0;
      char calibration_step = 0;
-     unsigned int DC_offset;
      calibration_delay--;
      if (!calibration_delay )
      {
@@ -339,10 +286,12 @@ void calibrate_offset()
             }
             // Check for sign reversal
             // Except the first time where old_calibration_step is invalid ( 0 )
-            if (calibration_steps && (calibration_steps != 31) && (old_calibration_step != calibration_step))
+            if (calibration_steps && (calibration_steps != 16) && (old_calibration_step != calibration_step))
             {
               // Sign reversal
               calibration_steps = 0;
+              // Do not change the DAC output anymore
+              calibration_step = 0;
             }  
             
              // When no sign reversal :  change DAC
@@ -358,24 +307,25 @@ void calibrate_offset()
             }
           }
         }
-
         // Check if calibration is finished - calibration_steps  = 0
         else
         {
+#if 0
            // Save the current DAC value in EEPROM for the start of a next
            // calibration.
            EEPROM_Write(0x00,DAC_value);
+#endif
            
            // Set the comparator 2 positive input 
            // DC generated by PWM2
            DC_offset >>= 2;           // 8 bit : 0-255 : 0-5V
            DC_offset = DC_offset - DC_OFFSET_MARGIN; // 1 V lower
-           PWM2_Set_Duty(DC_offset);  
+           PWM2_Set_Duty(DC_offset);
   
            // Startup delay - stabilisation
            calibration_busy = 0;
  //          startup_delay = STARTUP_DELAY;
- //          ready_sound();
+           ready_sound();
        }
     }
 
@@ -487,32 +437,7 @@ void tx_pulse_processing()
               pulsediff  = 0; 
            }
    
-#ifdef RS_OUTPUT    
-        sendhex (pulsediff, 1);         
-//         sendstring ("-", 0);
-#endif       
- 
-#ifdef PWM_AUDIO        
-         // Limit difference to half the pulse width
-          if (pulsediff > 128) 
-          {
-             pulsediff = 128;
-          }
-          
-          // Noise treshold
-          if (pulsediff < NOISE_TRESHOLD)
-          {
-             pulsediff = 0;
-          }
-  
-          //
-          // Audio
-          //
-          if (!startup_delay)
-          {
-             PWM3_Set_Duty(pulsediff);  
-          }
-#endif
+
            //  Limit pulse diff
            if (pulsediff > 64) 
            {
@@ -553,17 +478,7 @@ void tx_pulse_processing()
          {
              pulse_average_array[pulse_average_cnt%pulse_array_size] = pulsevalue;
          }
- #ifdef RS_OUTPUT    
-//        sendhex (accumulate_measure_cnt, 0);         
-//         sendstring ("-", 0);
-//         sendhex (pulse_array_size, 0);
-//         sendstring ("-", 0);
-//         sendhex (pulse_array_shift, 0);
-//         sendstring ("-", 0);
-//         sendhex (pulsevalue, 0);        
-//         sendstring ("-", 0);
-//         sendhex (pulse_average, 1);
-#endif         
+
          // 
          // Restart new values
          //
@@ -670,6 +585,7 @@ void main()
     DACCON0.DACPSS0 = 0;        // VDD
     DACCON0.DACPSS1 = 0;        // VDD
     DACCON0.DACNSS = 0;         // GND
+#if 0
     // Get initial DAC value from EEPROM
     DAC_value = EEPROM_Read(0x00);
     if (DAC_value > 32)
@@ -677,6 +593,7 @@ void main()
         // Invalid -> take the middle value
         DAC_value = 16;
     }
+#endif
     // 5V / 32 * DAC_value
     DACCON1 = DAC_value;
 
@@ -692,9 +609,7 @@ void main()
 
     // Comparator 2 init
     CM2CON0.C2POL = 0;      // comp output polarity is not inverted
-#ifndef RS_OUTPUT
     CM2CON0.C2OE = 1;       // comp output enabled
-#endif
     CM2CON0.C2SP = 1;       // high speed
     CM2CON0.C2ON = 1;       // comp is enabled
     CM2CON0.C2HYS = 1;      // hysteresis enabled
@@ -704,26 +619,8 @@ void main()
     CM2CON1.C2NCH1 = 0;     // C12IN1-
     CM2CON1.C2PCH0 = 0;     // comparator + input pin
     CM2CON1.C2PCH1 = 0;     // comparator + input pin
-#if 0
-    // Comparator 1 init
-    CM1CON0.C1POL = 0;      // comp output polarity is not inverted
-    CM1CON0.C1OE = 1;       // comp output enabled - pin 11 RA1
-    CM1CON0.C1SP = 1;       // high speed
-    CM1CON0.C1ON = 1;       // comp is enabled
-    CM1CON0.C1HYS = 1;      // hysteresis enabled
-    CM1CON0.C1SYNC = 0;     // comp output synchronous with timer 1
-    CM1CON1.C1NCH0 = 1;     // C12IN1-
-    CM1CON1.C1NCH1 = 0;     // C12IN1-
-    CM1CON1.C1PCH0 = 0;     // FVR reference
-    CM1CON1.C1PCH1 = 1;     // FVR reference
-    // Fixed voltage reference = 1.024 V
-    FVRCON.FVREN     = 1;      // enable 
-    FVRCON.CDAFVR1   = 1;      // Comparator and DAC FVR is 2x (1.024V)
-    FVRCON.CDAFVR0   = 0;
-    FVRCON.ADFVR1    = 0;      // ADC FVR off
-    FVRCON.ADFVR0    = 0;
-#endif
-    // timer0 timebase  - for sound generation
+    
+    // Timer0 timebase  - for sound generation
     OPTION_REG.PS0 = 1;
     OPTION_REG.PS1 = 1;
     OPTION_REG.PS2 = 0;      //prescaler / 16
@@ -731,18 +628,7 @@ void main()
     OPTION_REG.TMR0CS = 0;  // FOSC / 4   --> 8 MHz
     INTCON.TMR0IE = 1;          // timer0 interrupt enable
  
-#ifdef RS_OUTPUT
-    // UART 115200 bps
-    BAUDCON.BRG16 = 0;
-    TXSTA.BRGH = 1;
-    BAUDCON.SCKP = 0;           // Transmit not inverted data to the TX pin
-    SPBRGH = 0;                 // baud rate divider = 16
-    SPBRGL = 16;
-    TXSTA.TXEN = 1;
-    TXSTA.SYNC = 0;
-    RCSTA.SPEN = 1;
-#endif
-  
+
  
    //--------------------
    INTCON.GIE = 1;
@@ -756,46 +642,22 @@ void main()
    PWM2_Set_Duty(127);  
    PWM2_Start();
 
-#ifdef RS_OUTPUT
-   // TX pin on RC4
-   APFCON0.TXCKSEL = 0;        // pin 6
-#endif
-
-#ifdef RS_OUTPUT
-    // logo
-    sendstring("=====PICKINI V4=====", TRUE);
-#endif
-  
     // Startup sound
     start_sound();
 
-
-
-#ifdef PWM_AUDIO        
-
-   // PWM3 - pin 11
-    PWM3_Init(4000);          // 1 kHz
-    PWM3_Set_Duty(PWM_duty);  
-    PWM3_Start();
-#endif
- 
-  
-     
-     
- 
-    // main loop
+    // Main loop
     while(1)
     {
-      // check pulse time
+      // Check pulse time
       if (pulse_flag)
       {
-         // this is where TX pulse + RX processing takes place
+         // This is where TX pulse + RX processing takes place
          tx_pulse_processing();
          pulse_flag = FALSE;
       }
 
 
-      // check battery voltage
+      // Check battery voltage
       if (lv_flag)
       {
            lv_flag = FALSE;
@@ -810,7 +672,7 @@ void main()
       }
       
 
-      // check sensitivity potmeter
+      // Check sensitivity potmeter
       if (sensitivity_flag)
       {
          //  10 bit ADC value  -> max = 0x3FF
@@ -835,25 +697,30 @@ void main()
          sensitivity_flag = FALSE;
          
          // Adjust averaging array size
+         // Adjust comparator slicing value
          if (new_sensitivity < 15)
          {
              pulse_array_size = 32;
              pulse_array_shift = 5;
+             PWM2_Set_Duty(DC_offset - 10);
          }
          else if (new_sensitivity < 30)
          {
              pulse_array_size = 16;
              pulse_array_shift = 4;
+             PWM2_Set_Duty(DC_offset - 5);
          }
          else if (new_sensitivity < 40)
          {
              pulse_array_size = 8;
              pulse_array_shift = 3;
+             PWM2_Set_Duty(DC_offset);
          }
          else 
          {
              pulse_array_size = 4;
              pulse_array_shift = 2;
+             PWM2_Set_Duty(DC_offset);
          }
           
       } // if sensitivity flag
