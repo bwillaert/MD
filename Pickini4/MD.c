@@ -47,6 +47,7 @@
 #define ADC_TARGET               830      // (5V / 1024) * ADC_TARGET = DC offset
 #define ADC_TOLERANCE            10
 #define PULSE_ARRAY_SIZE         32
+
 #define DC_OFFSET_MARGIN         50       // 0-255 = 0-5V
 
 
@@ -584,7 +585,7 @@ void main()
     DACCON0.DACPSS0 = 0;        // VDD
     DACCON0.DACPSS1 = 0;        // VDD
     DACCON0.DACNSS = 0;         // GND
-//#if 0
+
     // Get initial DAC value from EEPROM
     DAC_value = EEPROM_Read(0x00);
     if (DAC_value > 32)
@@ -592,7 +593,7 @@ void main()
         // Invalid -> take the middle value
         DAC_value = 16;
     }
-//#endif
+
     // 5V / 32 * DAC_value
     DACCON1 = DAC_value;
 
