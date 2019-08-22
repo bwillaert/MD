@@ -6,13 +6,13 @@ Value=-1
 [BUILD_TYPE]
 Value=0
 [ACTIVE_TAB]
-Value=MD.c
+Value=Pickini4.c
 [USE_EEPROM]
 Value=0
 [USE_HEAP]
 Value=0
 [HEAP_SIZE]
-Value=0
+Value=2000
 [EEPROM_DEFINITION]
 Value=
 [FILES]
@@ -24,8 +24,9 @@ Count=0
 Count=0
 ActiveImageIndex=-1
 [OPENED_FILES]
-Count=1
-File0=MD.c
+Count=2
+File0=Pickini4.c
+File1=..\..\F2L\F2L\F2L.c
 [EEPROM]
 Count=0
 [ACTIVE_COMMENTS_FILES]
