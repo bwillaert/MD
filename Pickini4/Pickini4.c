@@ -47,7 +47,7 @@
 
 #define MAX_PULSEDIFF            64
 
-#define ACCUMULATE_MEASURE_CNT   5       // *  PULSE_TIME_DIVIDER * 512 micros
+#define ACCUMULATE_MEASURE_CNT   16       // *  PULSE_TIME_DIVIDER * 512 micros
 #define LV_TIME_DIVIDER          50000   // * 512 micros -- battery voltage check - every 25 s
 #define SENSITIVITY_TIME_DIVIDER 2000    // * 512 micros = 1s -- sensitivity potmeter check - every  1 s
 #define LOW_BATT_LIMIT           0x200   // 10 bits ADC  - max 3FF   min 10V - 47K+10K => 1.75V =358 / 0X166
@@ -56,9 +56,8 @@
 #define CALIBRATION_DELAY        1500     // * 2 ms - delay between 2 calibration steps
 #define ADC_TARGET               830      // (5V / 1024) * ADC_TARGET = DC offset
 #define ADC_TOLERANCE            10
-#define PULSE_ARRAY_SIZE         32
-
-#define DC_OFFSET_MARGIN         50       // 0-255 = 0-5V
+#define PULSE_ARRAY_SIZE         16
+#define DC_OFFSET_MARGIN         100       // 0-255 = 0-5V
 
 
 
@@ -341,6 +340,8 @@ void calibrate_offset()
            calibration_busy = 0;
  //          startup_delay = STARTUP_DELAY;
            ready_sound();
+           // Take sensitivity potmeter into account
+           sensitivity_flag = TRUE;
        }
     }
 
@@ -515,6 +516,7 @@ void main()
 {
     unsigned int batt_voltage;
     unsigned int new_sensitivity, old_sensitivity = 1;
+    unsigned int comp_ref = 0;
     accumulate_measure_cnt = ACCUMULATE_MEASURE_CNT;
     measurecnt = accumulate_measure_cnt;
     sensitivity_flag = TRUE;
@@ -533,7 +535,7 @@ void main()
     PWM_duty = 0;  // 0...127
     pulse_average_cnt = 0;
     pulse_array_size = PULSE_ARRAY_SIZE;
-    pulse_array_shift = 5;
+    pulse_array_shift = 4;
     alternate_beepdivider_time = 0;
 
     // oscillator
@@ -694,53 +696,33 @@ void main()
       if (sensitivity_flag)
       {
          //  10 bit ADC value  -> max = 0x3FF
-         // reduced to 6 bits: 0...63
-         new_sensitivity = (ADC_Read(3) >> 4);
+         // reduced to 7 bits: 0...127
+         new_sensitivity = (ADC_Read(3) >> 3);
+
          if (new_sensitivity < 4)
          {
             new_sensitivity = 4;
          }
-         if ( new_sensitivity > 63)
+         if ( new_sensitivity > 127)
          {
-            new_sensitivity = 63;
+            new_sensitivity = 127;
          }
          
          if (absvalue(old_sensitivity, new_sensitivity) > 1)
          {
-            accumulate_measure_cnt = new_sensitivity;
+            // Adjust comparator slicing level  0...255
+            comp_ref = DC_offset + new_sensitivity;
+            if (comp_ref > 255)
+            {
+               comp_ref = 255;
+            }
+            PWM2_Set_Duty((unsigned char)comp_ref);
+
+            // Take backup of current sensitivity setting
+            old_sensitivity = new_sensitivity;
+
          }
-         
-         // Take backup of current sensitivity setting
-         old_sensitivity = new_sensitivity;
-         sensitivity_flag = FALSE;
-         
-         // Adjust averaging array size
-         // Adjust comparator slicing value
-         if (new_sensitivity < 15)
-         {
-             pulse_array_size = 32;
-             pulse_array_shift = 5;
-             PWM2_Set_Duty(DC_offset - 10);
-         }
-         else if (new_sensitivity < 30)
-         {
-             pulse_array_size = 16;
-             pulse_array_shift = 4;
-             PWM2_Set_Duty(DC_offset - 5);
-         }
-         else if (new_sensitivity < 40)
-         {
-             pulse_array_size = 8;
-             pulse_array_shift = 3;
-             PWM2_Set_Duty(DC_offset);
-         }
-         else 
-         {
-             pulse_array_size = 4;
-             pulse_array_shift = 2;
-             PWM2_Set_Duty(DC_offset);
-         }
-          
+       sensitivity_flag = FALSE;
       } // if sensitivity flag
  
     }  // while(1)
