@@ -16,8 +16,11 @@
 #define RS_OUTPUT
 
 // I/O pins
-
-#define STATUS_LED       LATC.LATC5            // LED OUT     pin 5
+#define STATUS_LED       LATC.LATC3            // LED OUT     pin 7
+#define BEEP             LATA.LATA2            // OUT  audio  pin 11
+#define METER            LATA.LATA5            // PWM2 RA5    pin 2
+#define CAL_BUTTON       PORTA.RA3             // IN   calibration button       pin 4
+#define SENSITIVITY_IN   PORTC.RA4             // Sensitivity potmeter  AN3     pin 3
 
 
 // The 2 sensor signals are connected to CMP1 - inputs 1 and 2
@@ -27,26 +30,12 @@
 // RS232 TX pin          RC4 p6
 // RS232 RX pin          RC5 p5
 
-#define SAMPLE_ACCU_PERIODS     50             // Nr of output signal periods accumulated into 1 sample  - for 20  kHZ: *50 micros
-#define SAMPLE_ARRAY_SIZE       64             // Nr of samples into the running average array
+#define SAMPLE_ARRAY_SIZE_SHIFT 6            // 1 << SAMPLE_ARRAY_SIZE_SHIFT = Nr of samples into the running average array
+#define SAMPLE_ARRAY_SIZE  (1 << SAMPLE_ARRAY_SIZE_SHIFT)            // 2 << SAMPLE_ARRAY_SIZE_SHIFT = Nr of samples into the running average array
+#define SAMPLE_ACCU_TIME        100            // ms
+#define METER_MIDDLE_VALUE      127
 
-#define CMP_TIMEOUT             1000           // microseconds
 
-#define CAL_BUTTON              PORTA.RA3            // IN   calibration button      pin 4
-// p 11 = audio / PWM out
-#define BEEP             LATA.LATA2            // OUT  audio -- PWM3 RA2       pin 11
-
-// State machine states
-#define SM_SENS12_INIT     0
-#define SM_SENS12_START    1
-#define SM_SENS12_COUNT    2
-#define SM_SENS12_CALC     3
-
-#define SM_CALIBRATION    10
-#define SM_SENS_ERROR     20
-
-#define SM_SENSOR_1       1
-#define SM_SENSOR_2       2
 
 #define TRUE 1
 #define FALSE 0
@@ -63,27 +52,12 @@
 #define LINE_CR_LF 2
 
 
-static unsigned char  sm_state;
-static unsigned char  sm_sensor;
-static unsigned int   sm_timeout;
-static unsigned char  sample_period_cnt;
-static unsigned int   sample1, sample_min1, sample_max1, sample1_calculated, sample1_diff;
-static unsigned int   sample2, sample_min2, sample_max2;
-static unsigned int   sample1_diff_correction;
-static unsigned int   pwm_audio;
 
-//static unsigned char  sample_array_pointer; //_1;
-//static unsigned char  sample_array_pointer_2;
-//static unsigned int   sample_diff_array[SAMPLE_ARRAY_SIZE];
-//static unsigned long  sample_diff_average;
-
-static unsigned char  sm_calibration;
-static unsigned char  sm_calibration_show;
-
-const char STR_ENTER_CALIBRATION[] = "Entering calibration mode";
-const char STR_EXIT_CALIBRATION[] =  "Exit calibration mode";
-const char STR_WELCOME[] = "=====MAGPIC V1=====";
-const char STR_CAL_BUTTON[] = "CAL BUTTON:";
+static unsigned char  sample_array_pointer;
+static unsigned int   sample1, sample2;
+static int            sample_array[SAMPLE_ARRAY_SIZE];
+static unsigned char  meter_value;
+static unsigned int   beepcnt, beepdivider;
 
 //======================================================================
 //
@@ -91,20 +65,47 @@ const char STR_CAL_BUTTON[] = "CAL BUTTON:";
 //  Handle timer1 interrupt as timebase
 //
 //
-#if 0
+
 void interrupt(void)
 {
-
-     // Timer1 interrupt on each overflow from FFFF to 0000
-     if (PIR1.TMR1IF)
+    // Comparator1 output interrupt
+     if (PIR2.C1IF)
      {
-
-
+        sample1++;
         // Reset interrupt flag
-        PIR1.TMR1IF = 0;
-      }
+        PIR2.C1IF = 0;
+     }
+   // Comparator2 output interrupt
+     if (PIR2.C2IF)
+     {
+        sample2++;
+        // Reset interrupt flag
+        PIR2.C2IF = 0;
+     }
+     
+         // timer0 interrupt
+     if (INTCON.TMR0IF)
+     {
+          // sound
+          if (beepcnt)
+          {
+            beepcnt--;
+            {
+               if (!beepcnt)
+               {
+                  BEEP = !BEEP;
+                  beepcnt = beepdivider ;
+                }
+            }
+          }
+          else
+          {
+              beepcnt = beepdivider;
+          }
+
+     }
 }
-#endif
+
 
 //======================================================================
 //
@@ -249,53 +250,7 @@ unsigned int read_EEPROM(unsigned char address)
      return value;
 }
 
-//======================================================================
-// Show the calibration values
-//
-void send_calibration_values()
-{
-      sendhex (sample_min1, LINE_NONE);
-      sendchar(',');
-      sendchar(' ');
-      sendhex (sample_min2, LINE_NONE);
-      sendchar(',');
-      sendchar(' ');
-      sendhex (sample_max1, LINE_NONE);
-      sendchar(',');
-      sendchar(' ');
-      sendhex (sample_max2, LINE_CR_LF);
-}
 
-//======================================================================
-// Calculate the theoretical measured value
-// based on min and max values and the ref value ( high sensor ) = sample2
-//
-unsigned long calculate_sample()
-{
-   unsigned long val1_l;
-   unsigned int val1, val2;
-   unsigned int val3;
-   unsigned int val4;
-   unsigned long val5;
-   unsigned int val6;
-   unsigned long result;
-   if (sample1 > sample_min1)
-   {
-       val1 = sample2 - sample_min2;
-       val1_l = (unsigned long)val1 << 10;
-       val2 = sample_max2 - sample_min2;
-       val3 = val1_l/val2;
-       val4 = sample_max1 - sample_min1;
-       val5 = (unsigned long)val3*(unsigned long)val4;
-       val6 = val5 >> 10;
-       result = sample_min1 + val6;
-   }
-   else
-   {
-       result = 0;
-   }
-   return result;
-}
 
 //===================================
 //
@@ -304,7 +259,13 @@ unsigned long calculate_sample()
 void main()
 {
     unsigned char i;
-    char RXchar;
+   // char RXchar;
+    int sample_diff, sample_diff_deviation;
+    long sample_diff_sum;
+    int sample_diff_average;
+    unsigned int sensitivity;
+    beepdivider = 0;
+    beepcnt = 0;
 
     // oscillator
     OSCCON= 0xF0;
@@ -317,11 +278,11 @@ void main()
     PORTA.RA1 = 1;
     TRISA.TRISA2 = OUT;  // PIN 11 = audio out
     PORTA.RA2 = 1;
-    TRISA.TRISA3 = IN;  // PIN 4 = CAL button
+    TRISA.TRISA3 = OUT;  // PIN 4 = CAL button
     PORTA.RA3 = 1;
-    TRISA.TRISA4 = OUT;   // PIN 3 sensitivity potmeter in
+    TRISA.TRISA4 = IN;   // PIN 3 sensitivity potmeter in
     PORTA.RA4 = 1;
-    TRISA.TRISA5 = OUT;  // PIN 2
+    TRISA.TRISA5 = OUT;  // PIN 2  PWM2 out meter
     PORTA.RA5 = 1;
 
     // PORT C
@@ -340,8 +301,8 @@ void main()
 
     // Analog input pins
     ANSELA.ANSA0 = 0;     //
-    ANSELA.ANSA1 = 1;     // frequency potmeter in
-    ANSELA.ANSA4 = 1;     //
+    ANSELA.ANSA1 = 1;     //
+    ANSELA.ANSA4 = 1;     //  sensitivity potmeter
     ANSELC.ANSC0 = 0;     //
     ANSELC.ANSC1 = 1;     //  RC1 = C12IN1-
     ANSELC.ANSC2 = 1;     //  RC2 = C12IN2-
@@ -355,7 +316,24 @@ void main()
     CM1CON0.C1SYNC = 0;     // comp output synchronous with timer 1
     CM1CON1.C1PCH0 = 0;     // FVR reference
     CM1CON1.C1PCH1 = 1;     // FVR reference
-    CM1CON1.C1INTN = 1;     // C1IF flag set on negative edge
+    CM1CON1.C1NCH0 = 1;     // C12IN1-
+    CM1CON1.C1NCH1 = 0;     // C12IN1-
+    CM1CON1.C1INTN = 0;     //
+    CM1CON1.C1INTP = 1;     // C1IF flag set on rising edge
+
+    // Comparator 2 init
+    CM2CON0.C2POL = 1;      // comp output polarity is inverted
+    CM2CON0.C2OE = 0;       // comp output disabled
+    CM2CON0.C2SP = 1;       // high speed
+    CM2CON0.C2ON = 1;       // comp is enabled
+    CM2CON0.C2HYS = 1;      // hysteresis enabled
+    CM2CON0.C2SYNC = 0;     // comp output synchronous with timer 1
+    CM2CON1.C2PCH0 = 0;     // FVR reference
+    CM2CON1.C2PCH1 = 1;     // FVR reference
+    CM2CON1.C2NCH0 = 0;     // C12IN2-
+    CM2CON1.C2NCH1 = 1;     // C12IN2-
+    CM2CON1.C2INTN = 0;     //
+    CM2CON1.C2INTP = 1;     // C2IF flag set on rising edge
 
     // Fixed voltage reference = 1.024 V
     FVRCON.FVREN     = 1;      // enable
@@ -364,33 +342,7 @@ void main()
     FVRCON.ADFVR1    = 0;      // ADC FVR off
     FVRCON.ADFVR0    = 0;
 
-    // Timer 1 gating enabled by CMP1 output
-    T1GCON.TMR1GE = 0;                // timer 1 gate control
-    T1GCON.T1GPOL = 1;                // timer 1 gate active high
-    T1GCON.T1GTM = 0;
-    T1GCON.T1GSPM = 0;
-    T1GCON.T1GSS1 = 1;                // comparator 1
-    T1GCON.T1GSS0 = 0;                // comparator 1
-    T1CON.T1CKPS0 = 0;
-    T1CON.T1CKPS1 = 0;                // timer 1 prescaler = 0
-    T1CON.TMR1CS0 = 1;                // timer 1 clock = Fosc
-    T1CON.TMR1CS1 = 0;                // timer 1 clock = Fosc
-    T1CON.T1OSCEN = 0;                // timer 1 internal oscillator
-    T1CON.TMR1ON = 0;                 // timer 1 active
-    TMR1H = 0;                        // initial timer values
-    TMR1L = 0;
-    PIR1.TMR1IF = 0;
-
-  /*
-    // timer0 timebase  - for sound generation
-    OPTION_REG.PS0 = 0; //1;
-    OPTION_REG.PS1 = 0; //1;
-    OPTION_REG.PS2 = 0;      //prescaler / 16 --> /2 --> TMR0 overflow = 64 micros
-    OPTION_REG.PSA = 0;
-    OPTION_REG.TMR0CS = 0;  // FOSC / 4   --> 8 MHz
-    INTCON.TMR0IE = 1;          // timer0 interrupt enable
-   */
-     // ADC input
+    // ADC input
     ADCON0.ADON = 1;            //  ADC on
     ADCON1.ADFM = 1;            // right justified
     ADCON1.ADCS0 = 0;           // Fosc / 64
@@ -400,283 +352,154 @@ void main()
     ADCON1.ADPREF0 = 0;         // Vref+ = VDD
     ADCON1.ADPREF1 = 0;         // Vref+ = VDD
 
-    // Startup values
-    sm_state = SM_SENS12_INIT;
-    sm_sensor = SM_SENSOR_2;
-//    sample_array_pointer = 0;
-    sm_calibration = FALSE;
-    sm_calibration_show = FALSE;
-    sample1_diff_correction = 0;
-    pwm_audio = 0;
-//   sample_array_pointer_2 = 0;
+    APFCON1.CCP2SEL = 1;        // CCP2 function is on RA5
 
-    // Enable timer1 interrupt
+    // Enable comparator1 interrupt
+    PIE2.C1IE = 0; // comparator interrupt
+    // Enable comparator2 interrupt
+    PIE2.C2IE = 0; // comparator interrupt
+
+   // Timer0 timebase  - for sound generation
+    OPTION_REG.PS0 = 1;
+    OPTION_REG.PS1 = 1;
+    OPTION_REG.PS2 = 0;      // prescaler / 16
+    OPTION_REG.PSA = 0;
+    OPTION_REG.TMR0CS = 0;   // FOSC / 4   --> 8 MHz
+    INTCON.TMR0IE = 1;       // timer0 interrupt enable
+
+
+    // Enable global interrupt
     INTCON.PEIE = 1;
-//    PIE1.TMR1IE = 1;                // timer 1 interrupt enabled
     INTCON.GIE = 1;
+
+
+    // Initialize PWM output for meter
+    PWM2_Init(4000);          // 1 kHz
+    PWM2_Start();
+    meter_value = 127;
+    PWM2_Set_Duty(meter_value);
+
 
 #ifdef RS_OUTPUT
     // RX pin on RC5
-    APFCON0.RXDTSEL = 0;         // RX = pin 5 RC5
+    //APFCON0.RXDTSEL = 0;         // RX = pin 5 RC5
     // TX pin on RC4
     APFCON0.TXCKSEL = 0;        // pin 6 = RC4
 
     // Initialize UART
     UART1_Init(9600);
-
-
 #endif
 
 
     // Startup sound
+    STATUS_LED = ON;
     start_sound();
     
     // Delay
     Delay_ms(1000);
 
 
-    // Init PWM3 audio - pin 11
-    PWM3_Init(4000);          // 1 kHz
-    PWM3_Set_Duty(pwm_audio);
-    PWM3_Start();
-
-
-
 #ifdef RS_OUTPUT
     // Logo
-    sendstring(STR_WELCOME, LINE_CR_LF);
+    //sendstring(STR_WELCOME, LINE_CR_LF);
 #endif
 
+     // Startup values
+     // Take a first averaging sample array
+     sample_array_pointer = SAMPLE_ARRAY_SIZE;
 
-
-
-    // Restore calibration values
-    sample_min1 = read_EEPROM(0);
-    sample_max1 = read_EEPROM(1);
-    sample_min2 = read_EEPROM(2);
-    sample_max2 = read_EEPROM(3);
-
-     //  LED blink
-     STATUS_LED = ON;
-     Delay_ms(500);
-     STATUS_LED = OFF;
 
      // Main idle loop
      while(1)
      {
-
-        // State machine
-        switch (sm_state)
+        // Take a sample over 50 ms
+        PIE2.C1IE = 0;
+        PIE2.C2IE = 0;
+        sample1 = 0;
+        sample2 = 0;
+        PIE2.C1IE = 1;
+        PIE2.C2IE = 1;
+        Delay_ms( SAMPLE_ACCU_TIME);
+        PIE2.C1IE = 0;
+        PIE2.C2IE = 0;
+      /*
+        // xxxx
+        sendhex (sample1, LINE_NONE);
+        sendchar(',');
+        sendchar(' ');
+        sendhex (sample2, LINE_CR_LF);
+            */
+        
+        // status LED indicator
+        if (!sample1 || !sample2)
         {
-               case SM_SENS12_INIT:
-                    // Start new measurement  - toggle sensor selection
-                    if (sm_sensor == SM_SENSOR_1)
-                    {
-                       sm_sensor = SM_SENSOR_2;
-                       // Select sensor input C1IN2-
-                       CM1CON1.C1NCH0 = 0;     // C12IN1-
-                       CM1CON1.C1NCH1 = 1;     // C12IN1-  -- reference
-                    }
-                    else
-                    {
-                       sm_sensor = SM_SENSOR_1;
-                       // Select sensor input C1IN1-
-                       CM1CON1.C1NCH0 = 1;     // C12IN1-
-                       CM1CON1.C1NCH1 = 0;     // C12IN1-  -- measurement
-                    }
-                    // Timer1 gate control
-                    T1CON.TMR1ON = 0;     // Timer 1 off
-                    TMR1H = 0;            // Initial timer values
-                    TMR1L = 0;
-                    sm_timeout = CMP_TIMEOUT;
-                    sm_state = SM_SENS12_START;
-                    sample_period_cnt = 0;
-                   break;
-                    
-               case SM_SENS12_START:
-                    // Wait for a falling edge of the comparator
-                    PIR2.C1IF = 0;
-                    while (!PIR2.C1IF);
-                    // Start the timer and count periods
-                    T1CON.TMR1ON = 1;
-                    sample_period_cnt =  SAMPLE_ACCU_PERIODS;
-                    while (sample_period_cnt--)
-                    {
-                        PIR2.C1IF = 0;
-                        // Wait for the next falling edge
-                        while (!PIR2.C1IF);
-                    }
-                    // Stop timer1
-                    T1CON.TMR1ON = 0;
-                    sm_state = SM_SENS12_CALC;
-                    break;
-                    
-              case SM_SENS12_CALC:
-                   // We have a new sample
-                  if (sm_sensor == SM_SENSOR_1)
-                   {
-                      sample1 = ((TMR1H<<8) | TMR1L);   // Measurement  = low sensor
-                   }
-                   else
-                   {
-                      sample2 = ((TMR1H<<8) | TMR1L);  // Reference = high sensor
-                   }
-
-#ifdef RS_OUTPUT
-        // Send results over RS232
-        if (sm_sensor == SM_SENSOR_2)
-        { 
-        
-            // Predict the measured value - based on the ref values
-            // Ref = sample2  Meas = sample1
-            sample1_calculated = calculate_sample();
-
-            // Send the results
-            if (!sm_calibration && !sm_calibration_show) // This should be bit values ==> if no flags
-            {
-              sendhex (sample2, LINE_NONE);
-              sendchar(',');
-              sendchar(' ');
-              sendhex (sample1, LINE_NONE);
-              sendchar(',');
-              sendchar(' ');
-              sendhex (sample1_calculated, LINE_NONE);
-              sendchar(',');
-              sendchar(' ');
-              sample1_diff = absvalue(sample1, sample1_calculated);
-              sample1_diff = absvalue(sample1_diff_correction, sample1_diff);
-              
-              // Final - corrected sample diff
-              sendhex(sample1_diff, LINE_CR_LF);
-              
-              // Audio
-              if (sample1_diff > 512)
-              {
-                 pwm_audio = 512;
-              }
-              else
-              {
-                 pwm_audio = sample1_diff;
-              }
-              // Audio signal- max 128 = 50%
-              //PWM3_Set_Duty(pwm_audio>>2);
-              PWM3_Set_Duty(pwm_audio>>5);
-
-              
-            }
-            else if (sm_calibration)
-            {
-                // Sample2 = reference - sample12 = measurement
-                // Take a synchronous min and max of both sensors
-                // This enables to correlate the values in between
-                if (sample2 < sample_min2)
-                {
-                   sample_min2 = sample2;
-                   sample_min1 = sample1;
-                }
-                if (sample2 > sample_max2)
-                {
-                   sample_max2 = sample2;
-                   sample_max1 = sample1;
-                }
-                // Show calibration values
-                send_calibration_values();
-
-            }
-
-            
+           STATUS_LED = OFF;
         }
-#endif
-
-                   sm_state =  SM_SENS12_INIT;
-                   break;
-
-              case SM_SENS_ERROR:
-                   // Comparator timeout
-                   // Sensor error or not connected
-                   // Error sound..
-                   sm_state = SM_SENS12_INIT;
-                   break;
-
-              default:  // we should never get here
-                    sm_state = SM_SENS12_INIT;
-                    break;
-
-        } // state machine switch ------------------------
-
-        // Do other stuff   --------------
+        else
+        {
+           STATUS_LED = ON;
+        }
         
-        // Sensitivity potmeter
-        // ADC 0 - 512
-        // sensitivity = 512 - ADC + 20 --- 20 = max diff for full PWM audio range
+
+        // sample diff = int = sample1 - sample2
+        sample_diff = (int)(sample1 - sample2);
+        sample_array[sample_array_pointer % SAMPLE_ARRAY_SIZE] = sample_diff;
+        sample_array_pointer++;
         
-        // Audio PWM 0 - 512
-        // abs(sample1_diff, sample1_diff_correction)
-        
-        // Battery voltage measurement
-        // control red/green LED
+        // Battery voltage check
 
         // Check calibration pushbutton
         if (!CAL_BUTTON)
         {
-           sample1_diff_correction = sample1_diff;
-           sendstring(STR_CAL_BUTTON, LINE_NONE);
-           sendhex (sample1_diff_correction, LINE_CR_LF);
-           Delay_ms(1000);
-
+           // Take a new sample average
+          sample_diff_sum = 0;
+          for (i = 0; i < SAMPLE_ARRAY_SIZE; i++)
+          {
+             sample_diff_sum += sample_array[i];
+          }
+          sample_diff_average = sample_diff_sum >> SAMPLE_ARRAY_SIZE_SHIFT;
         }
+        
+      // This is the deviation of (the average difference between the 2 sensors) and
+        // (the new difference value):
+        sample_diff_deviation = sample_diff - sample_diff_average;
 
-        // Character received
-        // If data is ready, read it:
-        if (UART1_Data_Ready())
+        sendhex ((unsigned long)sample_diff, LINE_NONE);
+        sendchar(',');
+        sendchar(' ');
+        sendhex ((unsigned long)sample_diff_average, LINE_CR_LF);
+
+        // Adjust meter output PWM2
+        if (sample_diff_deviation < -127)
         {
-           RXchar = UART1_Read();
-           switch (RXchar)
-           {
-              case 'x':
-              case 'X':
-                   if (!sm_calibration)
-                   {
-                      sendstring(STR_ENTER_CALIBRATION, LINE_CR_LF);
-                      sm_calibration = TRUE;
-                      sample_min1 = sample_min2 = ~0;
-                      sample_max1 = sample_max2 = 0;
-                   }
-                   else
-                   {
-                      sendstring(STR_EXIT_CALIBRATION, LINE_CR_LF);
-                      sm_calibration = FALSE;
-                      
-                      // Write calibration values into EEPROM
-                      write_EEPROM(sample_min1,0);
-                      write_EEPROM(sample_max1,1);
-                      write_EEPROM(sample_min2,2);
-                      write_EEPROM(sample_max2,3);
-
-                   }
-                   break;
-
-               case 'y':
-               case 'Y':
-                    if (!sm_calibration_show)
-                    {
-                       // Show calibration values
-                       send_calibration_values();
-                       sm_calibration_show = TRUE;
-                    }
-                    else
-                    {
-                       sm_calibration_show = FALSE;
-                    }
-                   break;
-
-              default:
-                   //sendchar(RXchar);
-                   break;
-           }
+           sample_diff_deviation = -127;
+           // 500 Hz
+           beepdivider = 2;
+           beepcnt = 2;
         }
+        else if (sample_diff_deviation > 128)
+        {
+           sample_diff_deviation = 128;
+           // 1 kHz
+           beepcnt = 1;
+           beepdivider = 1;
+        }
+        else
+        {
+           // No beep
+           beepcnt = 0;
+           beepdivider = 0;
+        }
+        
+        
+        // Show the deviation from the middle value
+        meter_value = (unsigned char) ((int)METER_MIDDLE_VALUE + sample_diff_deviation);
+        PWM2_Set_Duty(meter_value);
 
-
+        // Get sensitivity potmeter: 0...255 --> sensor diff for max meter range
+        // 10 bit ADC value  -> max = 0x3FF
+        // reduced to 8 bits: 0...255
+         sensitivity = (ADC_Read(3) >> 2);
 
     }  // while(1)
 
