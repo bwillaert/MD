@@ -13,28 +13,29 @@
 //
 // constant values
 //
-#define RS_OUTPUT
+//#define RS_OUTPUT       // UART TX/RX for debugging/control
+// RS232 TX pin          RC4 p6
+// RS232 RX pin          RC5 p5
 
 // I/O pins
 #define STATUS_LED       LATC.LATC3            // LED OUT     pin 7
 #define BEEP             LATA.LATA2            // OUT  audio  pin 11
 #define METER            LATA.LATA5            // PWM2 RA5    pin 2
 #define CAL_BUTTON       PORTA.RA3             // IN   calibration button       pin 4
-#define SENSITIVITY_IN   PORTC.RA4             // Sensitivity potmeter  AN3     pin 3
-
+#define POTMETER_IN      PORTC.RA4             // Potmeter  AN3     pin 3
+#define BATT_VOLTAGE     PORTA.RA1             // Battery voltage measurement AN1 pin 12
 
 // The 2 sensor signals are connected to CMP1 - inputs 1 and 2
-// C12IN1-               RC1 p9
-// C12IN2-               RC2 p8
-// C1OUT                 RA2 p11
-// RS232 TX pin          RC4 p6
-// RS232 RX pin          RC5 p5
+// C12IN1-               RC1 p9 - sensor 1
+// C12IN2-               RC2 p8 - sensor 2
+// C1OUT                 RA2 p11 - not used, p11 = audio out
 
-#define SAMPLE_ARRAY_SIZE_SHIFT 6            // 1 << SAMPLE_ARRAY_SIZE_SHIFT = Nr of samples into the running average array
-#define SAMPLE_ARRAY_SIZE  (1 << SAMPLE_ARRAY_SIZE_SHIFT)            // 2 << SAMPLE_ARRAY_SIZE_SHIFT = Nr of samples into the running average array
+#define SAMPLE_ARRAY_SIZE_SHIFT 5            // 1 << SAMPLE_ARRAY_SIZE_SHIFT = Nr of samples into the running average array
+#define SAMPLE_ARRAY_SIZE  (1 << SAMPLE_ARRAY_SIZE_SHIFT)            // 1 << SAMPLE_ARRAY_SIZE_SHIFT = Nr of samples into the running average array
 #define SAMPLE_ACCU_TIME        100            // ms
 #define METER_MIDDLE_VALUE      127
-
+#define LOW_BATT_DELAY          1000           // * 50 ms
+#define LOW_BATT_TRESHOLD       200            // 4V
 
 
 #define TRUE 1
@@ -43,7 +44,7 @@
 #define OFF 0
 #define ON  1
 
-#define IN 1
+#define IN  1
 #define OUT 0
 
 // Line termination characters
@@ -62,10 +63,7 @@ static unsigned int   beepcnt, beepdivider;
 //======================================================================
 //
 //  ISR
-//  Handle timer1 interrupt as timebase
 //
-//
-
 void interrupt(void)
 {
     // Comparator1 output interrupt
@@ -102,7 +100,7 @@ void interrupt(void)
           {
               beepcnt = beepdivider;
           }
-
+          INTCON.TMR0IF = 0;
      }
 }
 
@@ -139,6 +137,19 @@ void start_sound()
     sound ( 20, 1000);    // 500 Hz
     Delay_ms(100);
     sound ( 10, 1000);    // 1 KHz
+}
+
+void low_batt_sound()
+{
+    sound ( 20, 1000);    // 500 Hz
+    Delay_ms(100);
+    sound ( 50, 1000);    // 200 Hz
+
+}
+
+void sensor_error_sound()
+{
+    sound ( 50, 1000);    // 200 Hz
 }
 
 //======================================================================
@@ -258,12 +269,14 @@ unsigned int read_EEPROM(unsigned char address)
 //
 void main()
 {
-    unsigned char i;
    // char RXchar;
     int sample_diff, sample_diff_deviation;
     long sample_diff_sum;
-    int sample_diff_average;
-    unsigned int sensitivity;
+    int sample_diff_average = METER_MIDDLE_VALUE;
+    unsigned int audio_treshold, battery_voltage;
+    unsigned int new_audio_treshold, old_audio_treshold = 0;
+    unsigned int low_batt_count = LOW_BATT_DELAY;
+    unsigned char i;
     beepdivider = 0;
     beepcnt = 0;
 
@@ -272,7 +285,7 @@ void main()
     
     // GPIO init
     // PORT A
-    TRISA.TRISA0 = IN;  // PIN 13 = potmeter
+    TRISA.TRISA0 = OUT;   // PIN 13
     PORTA.RA0 = 1;
     TRISA.TRISA1 = IN;   // PIN 12 = low battery
     PORTA.RA1 = 1;
@@ -280,7 +293,7 @@ void main()
     PORTA.RA2 = 1;
     TRISA.TRISA3 = OUT;  // PIN 4 = CAL button
     PORTA.RA3 = 1;
-    TRISA.TRISA4 = IN;   // PIN 3 sensitivity potmeter in
+    TRISA.TRISA4 = IN;   // PIN 3 potmeter in
     PORTA.RA4 = 1;
     TRISA.TRISA5 = OUT;  // PIN 2  PWM2 out meter
     PORTA.RA5 = 1;
@@ -302,7 +315,7 @@ void main()
     // Analog input pins
     ANSELA.ANSA0 = 0;     //
     ANSELA.ANSA1 = 1;     //
-    ANSELA.ANSA4 = 1;     //  sensitivity potmeter
+    ANSELA.ANSA4 = 1;     //  potmeter input
     ANSELC.ANSC0 = 0;     //
     ANSELC.ANSC1 = 1;     //  RC1 = C12IN1-
     ANSELC.ANSC2 = 1;     //  RC2 = C12IN2-
@@ -352,12 +365,12 @@ void main()
     ADCON1.ADPREF0 = 0;         // Vref+ = VDD
     ADCON1.ADPREF1 = 0;         // Vref+ = VDD
 
+    // Select PWM2 output pin
     APFCON1.CCP2SEL = 1;        // CCP2 function is on RA5
 
-    // Enable comparator1 interrupt
-    PIE2.C1IE = 0; // comparator interrupt
-    // Enable comparator2 interrupt
-    PIE2.C2IE = 0; // comparator interrupt
+    // Enable comparator interrupts
+    PIE2.C1IE = 0;
+    PIE2.C2IE = 0;
 
    // Timer0 timebase  - for sound generation
     OPTION_REG.PS0 = 1;
@@ -367,36 +380,43 @@ void main()
     OPTION_REG.TMR0CS = 0;   // FOSC / 4   --> 8 MHz
     INTCON.TMR0IE = 1;       // timer0 interrupt enable
 
-
     // Enable global interrupt
     INTCON.PEIE = 1;
     INTCON.GIE = 1;
 
-
     // Initialize PWM output for meter
     PWM2_Init(4000);          // 1 kHz
     PWM2_Start();
-    meter_value = 127;
-    PWM2_Set_Duty(meter_value);
+ //   meter_value = 127;
+ //   PWM2_Set_Duty(meter_value);
 
 
 #ifdef RS_OUTPUT
     // RX pin on RC5
-    //APFCON0.RXDTSEL = 0;         // RX = pin 5 RC5
+    //APFCON0.RXDTSEL = 0;         // RX = pin 5 = RC5
     // TX pin on RC4
-    APFCON0.TXCKSEL = 0;        // pin 6 = RC4
+    APFCON0.TXCKSEL = 0;           // TX = pin 6 = RC4
 
     // Initialize UART
     UART1_Init(9600);
 #endif
 
 
-    // Startup sound
-    STATUS_LED = ON;
-    start_sound();
-    
+    STATUS_LED = OFF;
+
+
+    // Get the battery voltage ( V/2 > 4V )
+    // Voltage divider: 8V = 5V       +--15K--10K--Gnd
+    battery_voltage = ADC_Read(1) >> 2;
+    PWM2_Set_Duty(battery_voltage);
+
     // Delay
-    Delay_ms(1000);
+    Delay_ms(2000);
+    
+    // Startup sound
+    start_sound();
+
+    PWM2_Set_Duty(METER_MIDDLE_VALUE);
 
 
 #ifdef RS_OUTPUT
@@ -405,84 +425,112 @@ void main()
 #endif
 
      // Startup values
-     // Take a first averaging sample array
-     sample_array_pointer = SAMPLE_ARRAY_SIZE;
+     sample_array_pointer = 0;
 
 
      // Main idle loop
      while(1)
      {
-        // Take a sample over 50 ms
+        // Take a sample over SAMPLE_ACCU_TIME ms
         PIE2.C1IE = 0;
         PIE2.C2IE = 0;
         sample1 = 0;
         sample2 = 0;
         PIE2.C1IE = 1;
         PIE2.C2IE = 1;
-        Delay_ms( SAMPLE_ACCU_TIME);
+        Delay_ms(SAMPLE_ACCU_TIME);
         PIE2.C1IE = 0;
         PIE2.C2IE = 0;
-      /*
-        // xxxx
-        sendhex (sample1, LINE_NONE);
-        sendchar(',');
-        sendchar(' ');
-        sendhex (sample2, LINE_CR_LF);
-            */
-        
-        // status LED indicator
+
+        // Status LED indicator - sensor error sound
         if (!sample1 || !sample2)
         {
            STATUS_LED = OFF;
+           sensor_error_sound();
         }
         else
         {
            STATUS_LED = ON;
         }
         
-
-        // sample diff = int = sample1 - sample2
+        // Sample difference = int = sample1 - sample2
         sample_diff = (int)(sample1 - sample2);
         sample_array[sample_array_pointer % SAMPLE_ARRAY_SIZE] = sample_diff;
         sample_array_pointer++;
         
-        // Battery voltage check
-
-        // Check calibration pushbutton
+        // Check calibration pushbutton pushed
         if (!CAL_BUTTON)
         {
-           // Take a new sample average
+           // Take a new sample diff average = this actual sample
           sample_diff_sum = 0;
           for (i = 0; i < SAMPLE_ARRAY_SIZE; i++)
           {
+             sample_array[i] = sample_diff;
              sample_diff_sum += sample_array[i];
           }
           sample_diff_average = sample_diff_sum >> SAMPLE_ARRAY_SIZE_SHIFT;
         }
-        
-      // This is the deviation of (the average difference between the 2 sensors) and
+
+        // This is the deviation of (the average difference between the 2 sensors) and
         // (the new difference value):
         sample_diff_deviation = sample_diff - sample_diff_average;
-
+ #ifdef RS_OUTPUT
         sendhex ((unsigned long)sample_diff, LINE_NONE);
         sendchar(',');
         sendchar(' ');
-        sendhex ((unsigned long)sample_diff_average, LINE_CR_LF);
-
+        sendhex ((unsigned long)sample_diff_average, LINE_NONE);
+        sendchar(',');
+        sendchar(' ');
+        sendhex ((unsigned long)audio_treshold, LINE_CR_LF);
+ #endif
         // Adjust meter output PWM2
         if (sample_diff_deviation < -127)
         {
            sample_diff_deviation = -127;
-           // 500 Hz
-           beepdivider = 2;
-           beepcnt = 2;
         }
         else if (sample_diff_deviation > 128)
         {
            sample_diff_deviation = 128;
-           // 1 kHz
-           beepcnt = 1;
-           beepdivider = 1;
+        }
+
+        // Show the deviation from the middle value
+        meter_value = (unsigned char) ((int)METER_MIDDLE_VALUE + sample_diff_deviation);
+        PWM2_Set_Duty(meter_value);
+
+        // Get potmeter value: 0...127 = audio treshold
+        // 10 bit ADC value  -> max = 0x3FF
+        // reduced to 8 bits: 0...255
+        new_audio_treshold = (ADC_Read(3) >> 3);
+        if (absvalue(new_audio_treshold, old_audio_treshold) > 1)
+        {
+           audio_treshold = new_audio_treshold;
+        }
+        old_audio_treshold = new_audio_treshold;
+        if (audio_treshold < 2 )
+        {
+           audio_treshold = 2;
+        }
+        if (audio_treshold > 125 )
+        {
+           audio_treshold = 125;
+        }
+
+        // Audio treshold: minimum = very sensitive
+        if (abs(sample_diff_deviation) > audio_treshold)
+        {
+           // Beep
+           if (sample_diff_deviation > 0)
+           {
+               // 1 kHz
+               beepcnt = 1;
+               beepdivider = 1;
+           }
+           else
+           {
+               // 500 Hz
+               beepdivider = 2;
+               beepcnt = 2;
+           }
         }
         else
         {
@@ -490,16 +538,25 @@ void main()
            beepcnt = 0;
            beepdivider = 0;
         }
-        
-        
-        // Show the deviation from the middle value
-        meter_value = (unsigned char) ((int)METER_MIDDLE_VALUE + sample_diff_deviation);
-        PWM2_Set_Duty(meter_value);
 
-        // Get sensitivity potmeter: 0...255 --> sensor diff for max meter range
-        // 10 bit ADC value  -> max = 0x3FF
-        // reduced to 8 bits: 0...255
-         sensitivity = (ADC_Read(3) >> 2);
+        // Get the battery voltage ( V/2 > 4V )
+        battery_voltage = ADC_Read(1) >> 2;  // min value = 4/5 = 200
+        if (battery_voltage < LOW_BATT_TRESHOLD)
+        {
+           if (low_batt_count)
+           {
+              low_batt_count--;
+           }
+           else
+           {
+               low_batt_count = LOW_BATT_DELAY;
+               low_batt_sound();
+           }
+        }
+        else // battery voltage OK
+        {
+            low_batt_count = LOW_BATT_DELAY;
+        }
 
     }  // while(1)
 
