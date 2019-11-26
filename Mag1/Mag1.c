@@ -387,8 +387,6 @@ void main()
     // Initialize PWM output for meter
     PWM2_Init(4000);          // 1 kHz
     PWM2_Start();
- //   meter_value = 127;
- //   PWM2_Set_Duty(meter_value);
 
 
 #ifdef RS_OUTPUT
@@ -398,12 +396,12 @@ void main()
     APFCON0.TXCKSEL = 0;           // TX = pin 6 = RC4
 
     // Initialize UART
-    UART1_Init(9600);
+    UART1_Init(115200);
 #endif
 
-
+    // Startup values
+    sample_array_pointer = 0;
     STATUS_LED = OFF;
-
 
     // Get the battery voltage ( V/2 > 4V )
     // Voltage divider: 8V = 5V       +--15K--10K--Gnd
@@ -424,9 +422,6 @@ void main()
     //sendstring(STR_WELCOME, LINE_CR_LF);
 #endif
 
-     // Startup values
-     sample_array_pointer = 0;
-
 
      // Main idle loop
      while(1)
@@ -445,13 +440,19 @@ void main()
         // Status LED indicator - sensor error sound
         if (!sample1 || !sample2)
         {
-           STATUS_LED = OFF;
            sensor_error_sound();
         }
-        else
-        {
-           STATUS_LED = ON;
-        }
+        
+        #ifdef RS_OUTPUT
+        sendhex ((unsigned long)sample1, LINE_NONE);
+        sendchar(',');
+        sendchar(' ');
+        sendhex ((unsigned long)sample2, LINE_NONE);
+        sendchar(',');
+        sendchar(' ');
+        sendhex ((unsigned long)audio_treshold, LINE_CR_LF);
+ #endif
+
         
         // Sample difference = int = sample1 - sample2
         sample_diff = (int)(sample1 - sample2);
@@ -461,7 +462,7 @@ void main()
         // Check calibration pushbutton pushed
         if (!CAL_BUTTON)
         {
-           // Take a new sample diff average = this actual sample
+          // Take a new sample diff average = this actual sample
           sample_diff_sum = 0;
           for (i = 0; i < SAMPLE_ARRAY_SIZE; i++)
           {
@@ -474,16 +475,8 @@ void main()
         // This is the deviation of (the average difference between the 2 sensors) and
         // (the new difference value):
         sample_diff_deviation = sample_diff - sample_diff_average;
- #ifdef RS_OUTPUT
-        sendhex ((unsigned long)sample_diff, LINE_NONE);
-        sendchar(',');
-        sendchar(' ');
-        sendhex ((unsigned long)sample_diff_average, LINE_NONE);
-        sendchar(',');
-        sendchar(' ');
-        sendhex ((unsigned long)audio_treshold, LINE_CR_LF);
- #endif
-        // Adjust meter output PWM2
+        
+         // Adjust meter output PWM2
         if (sample_diff_deviation < -127)
         {
            sample_diff_deviation = -127;
@@ -524,12 +517,14 @@ void main()
                // 1 kHz
                beepcnt = 1;
                beepdivider = 1;
+               STATUS_LED = ON;
            }
            else
            {
                // 500 Hz
                beepdivider = 2;
                beepcnt = 2;
+               STATUS_LED = ON;
            }
         }
         else
@@ -537,6 +532,7 @@ void main()
            // No beep
            beepcnt = 0;
            beepdivider = 0;
+           STATUS_LED = OFF;
         }
 
         // Get the battery voltage ( V/2 > 4V )

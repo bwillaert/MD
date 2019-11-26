@@ -24,10 +24,9 @@ Count=0
 Count=0
 ActiveImageIndex=-1
 [OPENED_FILES]
-Count=3
+Count=2
 File0=Mag1.c
-File1=Mag1_org.c
-File2=..\Pickini4\Pickini4.c
+File1=..\Pickini4\Pickini4.c
 [EEPROM]
 Count=0
 [ACTIVE_COMMENTS_FILES]
