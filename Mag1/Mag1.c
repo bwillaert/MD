@@ -13,7 +13,7 @@
 //
 // constant values
 //
-//#define RS_OUTPUT       // UART TX/RX for debugging/control
+#define RS_OUTPUT       // UART TX/RX for debugging/control
 // RS232 TX pin          RC4 p6
 // RS232 RX pin          RC5 p5
 
@@ -22,6 +22,7 @@
 #define BEEP             LATA.LATA2            // OUT  audio  pin 11
 #define METER            LATA.LATA5            // PWM2 RA5    pin 2
 #define CAL_BUTTON       PORTA.RA3             // IN   calibration button       pin 4
+#define SENSITIVITY_HIGH PORTA.RA0             // IN pin 13 : low = sensitivity low - high = default (no switch) sensitivity high
 #define POTMETER_IN      PORTC.RA4             // Potmeter  AN3     pin 3
 #define BATT_VOLTAGE     PORTA.RA1             // Battery voltage measurement AN1 pin 12
 
@@ -285,7 +286,7 @@ void main()
     
     // GPIO init
     // PORT A
-    TRISA.TRISA0 = OUT;   // PIN 13
+    TRISA.TRISA0 = IN;   // PIN 13 = sensitivity low/high
     PORTA.RA0 = 1;
     TRISA.TRISA1 = IN;   // PIN 12 = low battery
     PORTA.RA1 = 1;
@@ -408,9 +409,13 @@ void main()
     battery_voltage = ADC_Read(1) >> 2;
     PWM2_Set_Duty(battery_voltage);
 
-    // Delay
-    Delay_ms(2000);
-    
+    // Delay sound
+    for (i = 0; i < 5; ++i)
+    {
+        Delay_ms(200);
+        sound ( 10, 2000);    // 1 KHz
+     }
+
     // Startup sound
     start_sound();
 
@@ -456,6 +461,11 @@ void main()
         
         // Sample difference = int = sample1 - sample2
         sample_diff = (int)(sample1 - sample2);
+        // If sensitivity switch is low : sample diff / 4  ( 0 ... 1023 instead of 0 ... 255)
+        if (!SENSITIVITY_HIGH)
+        {
+           sample_diff >>= 2;
+        }
         sample_array[sample_array_pointer % SAMPLE_ARRAY_SIZE] = sample_diff;
         sample_array_pointer++;
         
