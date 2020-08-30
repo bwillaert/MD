@@ -43,7 +43,8 @@ Periode in microseconden = 1000000/Vin
 //#define PI_TX            LATA.LATA5           // OUT  DIG               TX pulse                pin 2
 #define ENABLE           PORTA.RA3            // IN DIG                 enable VCO: active high      pin 4
 
-#define VCO_PERIOD_MAX 1000000                // ° 1 microsecond = 1 second
+#define VCO_PERIOD_MAX 1363968                // ° 1 microsecond  = 333 * 4096 for 3 kHz max
+#define MAIN_LOOP_DURATION 300                // 300 microseconds
 
 #define TRUE 1
 #define FALSE 0
@@ -55,46 +56,19 @@ Periode in microseconden = 1000000/Vin
 #define OUT 0
 
 
-// globals
-static unsigned long divider_reload;
-static unsigned long divider_actual;
 
 
-//======================================================================
-//
-//  ISR
-//  Handle timer2 interrupt for VCO output - interrupt per 1 microsecond
-//
-//
-void interrupt(void)
+void VDelay_us(unsigned time_us)
 {
-
-     // Timer2 interrupt
-     if (PIR1.TMR2IF)
-     {
-          // VCO output divider
-          if (divider_actual)
-          {
-            divider_actual--;
-            {
-               if (!divider_actual)
-               {
-                  //BEEP = !BEEP;
-                  divider_actual = divider_reload;
-               }
-            }
-          }
-          else
-          {
-              divider_actual = divider_reload;
-          }
-
-
-        // Reset timer2 interrupt flag
-        PIR1.TMR2IF = FALSE;
-     }
+  unsigned n_cyc;
+  n_cyc = Clock_MHz()>>2;
+  n_cyc *= time_us>>4;
+  while (n_cyc--) 
+  {
+      asm nop;
+      asm nop;
+  }
 }
-
 
 //===================================
 //
@@ -103,6 +77,9 @@ void interrupt(void)
 void main()
 {
     unsigned long voltage_in;
+    unsigned long vco_period;
+    unsigned long main_loop_delay;
+    unsigned long main_loop_delay_cnt;
     
     // oscillator
     OSCCON= 0xF0;       // PLLenabled + 8MHz internal
@@ -150,23 +127,46 @@ void main()
     T2CON.TMR2ON       = 1;       // Timer2 ON
     PIE1.TMR2IE        = 1;       // Enable TMR2 interrupt
 
-    INTCON.GIE         = 1;
+   // INTCON.GIE         = 1;
    //--------------------
+
+
+
 
     // Main loop
     while(TRUE)
     {
       // Check voltage input 0...4095
-      voltage_in = ADC_Read(1) << 2;
+    //  voltage_in = ADC_Read(1) << 2;
+      voltage_in = 1678;
       if (voltage_in == 0)
       {
          voltage_in = 1;
       }
 
       // Calculate new divider
-      divider_reload = VCO_PERIOD_MAX / voltage_in;
+      vco_period = VCO_PERIOD_MAX / voltage_in;
+      vco_period >>= 1;
+      
+      vco_period = 90000;
 
-      //xxxxx
+      if (vco_period > MAIN_LOOP_DURATION)
+      {
+         main_loop_delay =  vco_period - MAIN_LOOP_DURATION;
+         while (main_loop_delay)
+         {
+           if (main_loop_delay > 65535)
+           {
+              VDelay_us(65535);
+              main_loop_delay -= 65535;
+           }
+           else
+           {
+              VDelay_us(main_loop_delay);
+              main_loop_delay = 0;
+           }
+         }
+      }
       BEEP = !BEEP;
 
     }  // while()
