@@ -44,8 +44,8 @@
 #define ADC_TARGET               830      // (5V / 1024) * ADC_TARGET = DC offset
 #define ADC_TOLERANCE            10
 #define PULSE_ARRAY_SIZE         32
-
-#define PULSE_SLICE_VALUE        20       // DAC = comparator positive input
+#define PULSE_AVERAGE_DIVIDER    5
+#define PULSE_SLICE_VALUE        5
 
 // Line termination characters
 #define LINE_NONE  0
@@ -67,8 +67,6 @@
 
 
 // globals
-static unsigned int measurecnt;
-static unsigned int accumulate_measure_cnt;
 static unsigned int pulse_time;
 static unsigned char pulse_flag;
 static unsigned int beepdivider;
@@ -77,15 +75,19 @@ static unsigned int alternate_beepdivider_time;
 static unsigned int beepcnt;
 static unsigned int lv_time;
 static unsigned char lv_flag;
+static unsigned char new_measurement_flag;
 static unsigned char sensitivity_flag;
 static unsigned int sensitivity_time;
 static unsigned int  startup_delay;
 static unsigned int coil_timeout;
-static unsigned char DAC_value;
 static unsigned long pulse_average_array[PULSE_ARRAY_SIZE];
-static unsigned long pulse_average;
-
-static unsigned int period_cnt;
+static unsigned long pulse_time_average;
+static unsigned char pulse_average_cnt;
+static unsigned int pulse_cnt;
+static unsigned int pulse_time_measured;
+static int pulse_time_diff;
+static unsigned int max_pulse_cnt;
+static unsigned char startup_flag;
 
 
 //======================================================================
@@ -99,7 +101,14 @@ void interrupt(void)
      // comparator interrupt
      if (PIR2.C2IF)
      {
-        period_cnt++;
+        pulse_cnt++;
+        if (pulse_cnt == max_pulse_cnt)
+        {
+           // Stop timer1
+           T1CON.TMR1ON = 0;
+           pulse_time_measured = (TMR1H<<8) | TMR1L;
+           new_measurement_flag = TRUE;
+        }
         PIR2.C2IF = 0;
      }
      
@@ -331,7 +340,14 @@ void tx_pulse()
       
       // Start the timer
       T1CON.TMR1ON = 1;                // timer 1 active
-      period_cnt = 0;
+      
+      // Determine the max number of oscillations
+      if (startup_flag && pulse_cnt)
+      {
+         startup_flag = FALSE;
+         max_pulse_cnt = pulse_cnt - 3;
+      }
+      pulse_cnt = 0;
 
 }
 
@@ -343,10 +359,10 @@ void main()
 {
     unsigned int batt_voltage;
     unsigned int new_sensitivity, old_sensitivity = 1;
-    accumulate_measure_cnt = ACCUMULATE_MEASURE_CNT;
-    measurecnt = accumulate_measure_cnt;
+    int i = 0;
     sensitivity_flag = TRUE;
     pulse_flag = FALSE;
+    new_measurement_flag = FALSE;
     beepdivider = 2048;
     beepcnt = 2048;
     lv_time = LV_TIME_DIVIDER;
@@ -355,6 +371,7 @@ void main()
     sensitivity_time = SENSITIVITY_TIME_DIVIDER;
     pulse_time = PULSE_TIME_DIVIDER;
     alternate_beepdivider_time = 0;
+    startup_flag = FALSE;
 
     // oscillator
     OSCCON= 0xF0;
@@ -453,9 +470,9 @@ void main()
 
 #ifdef RS_OUTPUT
     // RX pin on RC5
-    APFCON0.RXDTSEL = 0;         // RX = pin 5 RC5
+    APFCON0.RXDTSEL = 0;         // RX = pin 5 = RC5
     // TX pin on RC4
-    APFCON0.TXCKSEL = 0;        // pin 6 = RC4
+    APFCON0.TXCKSEL = 0;        // TX = pin 6 = RC4
     // Initialize UART
     UART1_Init(9600);
 #endif
@@ -471,6 +488,7 @@ void main()
     // Setup stage
     // Measure amount of oscillation pulses
     while (startup_delay);
+    startup_flag = TRUE;
 
     // Detector ready sound
     ready_sound();
@@ -481,11 +499,28 @@ void main()
       // Check pulse time
       if (pulse_flag)
       {
-         // This is where TX pulse + RX processing takes place
+         // TX pulse
          tx_pulse();
          pulse_flag = FALSE;
       }
 
+      // New measurement available
+      if (new_measurement_flag)
+      {
+         new_measurement_flag = FALSE;
+         pulse_average_array[pulse_average_cnt%PULSE_ARRAY_SIZE] = pulse_time_measured;
+         // Get the average pulse value
+         pulse_time_average = 0;
+         for (i = 0; i < PULSE_ARRAY_SIZE; i++)
+         {
+              pulse_time_average += pulse_average_array[i];
+         }
+         pulse_time_average >>= PULSE_AVERAGE_DIVIDER;
+         pulse_time_diff = pulse_time_measured - pulse_time_average;
+         // Evalate pulse_time_diff pos or neg --> sensitivity --> 2 tone sound
+         // XXX
+         pulse_average_cnt++;
+      }
 
       // Check battery voltage
       if (lv_flag)
