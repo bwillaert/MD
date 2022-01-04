@@ -465,14 +465,14 @@ void main()
     OPTION_REG.PS1 = 1;
     OPTION_REG.PS2 = 0;      //prescaler / 16
     OPTION_REG.PSA = 0;
-    OPTION_REG.TMR0CS = 0;  // FOSC / 4   --> 8 MHz
-    INTCON.TMR0IE = 1;          // timer0 interrupt enable
+    OPTION_REG.TMR0CS = 0;   // FOSC / 4   --> 8 MHz
+    INTCON.TMR0IE = 1;       // timer0 interrupt enable
 
 #ifdef RS_OUTPUT
     // RX pin on RC5
     APFCON0.RXDTSEL = 0;         // RX = pin 5 = RC5
     // TX pin on RC4
-    APFCON0.TXCKSEL = 0;        // TX = pin 6 = RC4
+    APFCON0.TXCKSEL = 0;         // TX = pin 6 = RC4
     // Initialize UART
     UART1_Init(9600);
 #endif
@@ -509,6 +509,7 @@ void main()
       {
          new_measurement_flag = FALSE;
          pulse_average_array[pulse_average_cnt%PULSE_ARRAY_SIZE] = pulse_time_measured;
+         pulse_average_cnt++;
          // Get the average pulse value
          pulse_time_average = 0;
          for (i = 0; i < PULSE_ARRAY_SIZE; i++)
@@ -519,8 +520,20 @@ void main()
          pulse_time_diff = pulse_time_measured - pulse_time_average;
          // Evalate pulse_time_diff pos or neg --> sensitivity --> 2 tone sound
          // XXX
-         pulse_average_cnt++;
-      }
+         sendhex (pulse_time_measured, LINE_NONE);
+         sendchar(',');
+         if (pulse_time_diff >= 0)
+         {
+           sendchar('+');
+         }
+         else
+         {
+           sendchar('-');
+         }
+         sendhex (abs(pulse_time_diff), LINE_NONE);
+         sendchar(',');
+         sendhex (max_pulse_cnt, LINE_CR_LF);
+       }
 
       // Check battery voltage
       if (lv_flag)
